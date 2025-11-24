@@ -86,6 +86,31 @@ function holdOut(N::Int, Pval::Real, Ptest::Real)
     return (trainIndices, valIndices, testIndices)
 end
 
+function calculateMinMaxNormalizationParameters(dataset::AbstractArray{<:Real,2})
+    return minimum(dataset, dims=1), maximum(dataset, dims=1)
+end;
+
+function normalizeMinMax!(dataset::AbstractArray{<:Real,2},      
+        normalizationParameters::NTuple{2, AbstractArray{<:Real,2}})
+    
+    if isempty(dataset)
+        @warn "Dataset provided for normalization is empty (0x0 or Nx0). Skipping normalization."
+        return dataset
+    end
+
+    minValues = normalizationParameters[1];
+    maxValues = normalizationParameters[2];
+    dataset .-= minValues;
+    dataset ./= (maxValues .- minValues);
+    # eliminate any atribute that do not add information
+    dataset[:, vec(minValues.==maxValues)] .= 0;
+    return dataset;
+end;
+
+function normalizeMinMax!(dataset::AbstractArray{<:Real,2})
+    normalizeMinMax!(dataset , calculateMinMaxNormalizationParameters(dataset));
+end;
+
 function calculateZeroMeanNormalizationParameters(dataset::AbstractArray{<:Real,2})
     return mean(dataset, dims=1), std(dataset, dims=1)
 end;
@@ -569,8 +594,6 @@ function crossvalidation(targets::AbstractArray{Bool,1}, k::Int64)
     return idx
 end
 function crossvalidation(targets::AbstractArray{Bool,2}, k::Int64)
-    println("HOLA")
-
     N, C = size(targets)
     idx = zeros(Int, N)
 
@@ -582,6 +605,10 @@ function crossvalidation(targets::AbstractArray{Bool,2}, k::Int64)
 end
 function crossvalidation(targets::AbstractArray{<:Any,1}, k::Int64)
     return crossvalidation(oneHotEncoding(targets), k)
+end
+function crossvalidation(targets::AbstractArray{<:Any,1}, k::Int64)
+    one_hot_targets = oneHotEncoding(targets)
+    return crossvalidation(one_hot_targets, k)
 end
 function ANNCrossValidation(
     topology::AbstractArray{<:Int,1},
