@@ -1,0 +1,2 @@
+Pasamos lista:
+- Carlos: Presente
