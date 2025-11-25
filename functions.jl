@@ -5,10 +5,12 @@ using Statistics
 using DelimitedFiles
 import Pkg;
 Pkg.add("MLJ")
+import Pkg; Pkg.add("Optimisers")
 using MLJ;
+using Optimisers;
 const SVMClassifier = @load SVC pkg=LIBSVM verbosity=0
 const SVMPlassifier = @load ProbabilisticSVC pkg=LIBSVM
-
+const ANNClassifier = @load NeuralNetworkClassifier pkg=MLJFlux verbosity=0
 const DTClassifier = @load DecisionTreeClassifier pkg=DecisionTree verbosity=0
 const kNNClassifier = @load KNNClassifier pkg=NearestNeighborModels verbosity=0
 import Pkg; Pkg.add("MLJLIBSVMInterface")
@@ -815,8 +817,26 @@ function createModel(modelType::Symbol, modelHyperparameters::Dict)
         @assert topology !== nothing "In ANN topology must be defined"
         numOutputs = getparam(modelHyperparameters, :numOutputs, nothing)
         @assert numOutputs !== nothing "In ANN numOutputs must be defined"
-        transferFunctions = getparam(modelHyperparameters, :transferFunctions, fill(σ, length(topology)))
-        model = buildClassANN(numInputs, topology, numOutputs; transferFunctions=transferFunctions)
+        transferFunctions = getparam(modelHyperparameters, :transferFunctions, σ)
+        
+        # 2. Get MLJFlux-specific hyperparameters (epochs, learning rate, etc.)
+        epochs_val = getparam(modelHyperparameters, :maxEpochs, 10)
+        learningRate_val = getparam(modelHyperparameters, :learningRate, 0.01)
+        batch_size_val = getparam(modelHyperparameters, :batch_size, 1) # Add batch_size to your hyperparameters!
+
+        mlp_builder = MLJFlux.MLP(
+            hidden = topology,
+            σ = transferFunctions
+        )
+
+        # 2. Wrap the builder in the MLJFlux model type
+        model = ANNClassifier(
+            builder = mlp_builder,
+            epochs = epochs_val,
+            optimiser = Optimisers.Adam(learningRate_val),
+            batch_size = batch_size_val,
+            finaliser = identity # identity is correct because your original buildClassANN handles the final activation (softmax or σ)
+        )
     else
         error("The model type $(modelType) is not allowed")
     end

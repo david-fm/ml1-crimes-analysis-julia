@@ -5,6 +5,7 @@ using Flux.Losses
 using Random
 using Statistics
 using MLJ
+using Optimisers
 import LIBSVM
 
 using ..Preprocessing: oneHotEncoding,
@@ -26,6 +27,7 @@ const SVMClassifier = @load SVC pkg=LIBSVM verbosity=0
 const SVMPlassifier = @load ProbabilisticSVC pkg=LIBSVM
 const DTClassifier = @load DecisionTreeClassifier pkg=DecisionTree verbosity=0
 const kNNClassifier = @load KNNClassifier pkg=NearestNeighborModels verbosity=0
+const ANNClassifier = @load NeuralNetworkClassifier pkg=MLJFlux verbosity=0
 
 # -----------------------------------------------------------------------------
 # Neural network construction and training routines for classification tasks.
@@ -733,6 +735,16 @@ Instantiate an MLJ model or ANN using the supplied hyperparameters.
 - `Any`: Configured MLJ model or Flux `Chain` ready for training.
 """
 function createModel(modelType::Symbol, modelHyperparameters::Dict)
+    """Create an MLJ model of type `modelType` with the given `modelHyperparameters`.
+    # Arguments:
+    - `modelType::Symbol`: The type of model to create. Supported types are `:SVC`, `:DecisionTreeClassifier`, `:KNeighborsClassifier`, `:SVPC`, and `:ANN`.
+    - `modelHyperparameters::Dict`: A dictionary containing the hyperparameters for the model.
+    # Returns:
+    - `AbstractClassifier`: An instance of the specified model type with the provided hyperparameters.
+    # Raises:
+    - `AssertionError`: If required hyperparameters are missing for the specified model type.
+    - `Error`: If the specified `modelType` is not supported.
+    """
     if modelType == :SVC || modelType == :SVPC
         # Map the string kernel name from `modelHyperparameters` to the correct `LIBSVM.Kernel` constant
         kernel_name = getparam(modelHyperparameters, :kernel, nothing)
@@ -782,14 +794,19 @@ function createModel(modelType::Symbol, modelHyperparameters::Dict)
         @assert k_val != nothing "For kNN model, 'K' must be specified in modelHyperparameters"
         model = kNNClassifier(K=k_val)
     elseif modelType == :ANN
-        numInputs = getparam(modelHyperparameters, :numInputs, nothing)
-        @assert numInputs !== nothing "In ANN numInputs must be defined"
         topology = getparam(modelHyperparameters, :topology, nothing)
         @assert topology !== nothing "In ANN topology must be defined"
-        numOutputs = getparam(modelHyperparameters, :numOutputs, nothing)
-        @assert numOutputs !== nothing "In ANN numOutputs must be defined"
-        transferFunctions = getparam(modelHyperparameters, :transferFunctions, fill(σ, length(topology)))
-        model = buildClassANN(numInputs, topology, numOutputs; transferFunctions=transferFunctions)
+        transferFunctions = getparam(modelHyperparameters, :transferFunctions, fill(σ, length(topology))) 
+
+
+        mlp_builder = MLJFlux.MLP(
+            hidden = topology,
+            σ = transferFunctions
+        )
+        modelHyperparameters[:builder] = mlp_builder
+        delete!(modelHyperparameters, :topology)
+        delete!(modelHyperparameters, :transferFunctions)
+        model = ANNClassifier(; modelHyperparameters...)
     else
         error("The model type $(modelType) is not allowed")
     end
