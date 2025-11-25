@@ -924,3 +924,52 @@ function modelCrossValidation(
     ) 
     return results
 end
+
+function draw_results(x, y; colors, target_names=nothing)
+    num_classes = length(unique(colors))
+
+    if !isnothing(target_names)
+        @assert num_classes == length(target_names)
+        label = target_names
+    else
+        label = [string(i) for i in 1:num_classes]
+    end
+
+    fig = plot()
+    if (num_classes == 2)
+        possitive_class = y[:,1].==1
+        scatter!(fig, x[possitive_class,1], x[possitive_class,2], markercolor=colors[1], label=label[1])
+        scatter!(fig, x[.!possitive_class,1], x[.!possitive_class,2], markercolor=colors[2], label=label[2])
+    else
+        for i in 1:num_classes
+            index_class = y[:,i].==1
+            scatter!(fig, x[index_class, 1], x[index_class, 2], markercolor=colors[i], label=label[i])
+        end
+    end
+end
+
+function bin_to_multiclass(data_vector::AbstractVector{<:Real}, bin_edges::AbstractVector{<:Real})
+    
+    # 1. Error checking for valid input
+    if length(bin_edges) < 2
+        throw(ArgumentError("bin_edges must contain at least 2 elements."))
+    end
+    
+    # 2. Map each data point to its corresponding bin index
+    # We use broadcasting (`.`) and an anonymous function/comprehension.
+    # searchsortedlast(A, x) returns the index of the last element in A <= x.
+    # We adjust the index for values outside the defined edges:
+    #   - For value x < bin_edges[1], searchsortedlast returns 0. We map it to 1 (first bin).
+    #   - For value x >= bin_edges[end], searchsortedlast returns length(bin_edges) - 1. We map it to length(bin_edges) - 1 (last bin).
+    #
+    # To simplify: we treat the bins as [edge_i, edge_{i+1})
+    # The bin index will be 1 to length(bin_edges) - 1.
+    
+    num_bins = length(bin_edges) - 1
+    
+    # Use a list comprehension for efficiency and clarity
+    return [
+        max(1, min(num_bins, searchsortedlast(bin_edges, x)))
+        for x in data_vector
+    ]
+end
