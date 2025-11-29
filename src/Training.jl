@@ -21,7 +21,8 @@ export buildClassANN,
        ANNCrossValidation,
        createModel,
        modelCrossValidation,
-       getparam
+       getparam,
+       evaluate_regression
 
 const SVMClassifier = @load SVC pkg=LIBSVM verbosity=0
 const SVMPlassifier = @load ProbabilisticSVC pkg=LIBSVM
@@ -923,4 +924,141 @@ function modelCrossValidation(
     return results
 end
 
+"""
+    modelCrossValidationWithModel(modelType, modelHyperparameters, dataset, crossValidationIndices)
+
+Perform k-fold cross-validation for ANN or MLJ models and aggregate metrics.
+
+# Arguments:
+- modelType::Symbol: Type of learner (:ANN, :SVC, :DecisionTreeClassifier, :KNeighborsClassifier).
+- modelHyperparameters::Dict: Hyperparameters passed to the chosen learner.
+- dataset::Tuple{AbstractArray{<:Real,2}, AbstractArray{<:Any,1}}: Feature matrix and target labels.
+- crossValidationIndices::Array{Int64,1}: Fold id assignment per sample.
+
+# Returns:
+- NamedTuple: Means and standard deviations of evaluation metrics and the averaged confusion matrix.
+- mach: The trained machine
+"""
+function modelCrossValidationWithModel(
+    modelType::Symbol, modelHyperparameters::Dict,
+    dataset::Tuple{AbstractArray{<:Real,2}, AbstractArray{<:Any,1}},
+    crossValidationIndices::Array{Int64,1})
+
+    mach = -1
+
+    if modelType == :ANN
+        topology = getparam(modelHyperparameters, :topology, nothing)
+        @assert topology != nothing "For ANN model, 'topology' must be specified in modelHyperparameters"
+        
+        # Remove topology from the dict to avoid passing it twice
+        filtered_params = filter(p -> p.first != :topology && p.first != "topology", modelHyperparameters)
+        
+        return (ANNCrossValidation(
+            topology,
+            dataset,
+            crossValidationIndices;
+            filtered_params...
+        ), mach)
+    end
+
+    
+    inputs, targets = dataset
+    targets = string.(targets)
+    # Extract class labels
+    classes = unique(targets)
+    num_classes = length(classes)
+
+    # Determine the number of folds
+    num_folds = maximum(crossValidationIndices)
+
+    acc_folds = zeros(Float32, num_folds)
+    err_folds = zeros(Float32, num_folds)
+    sens_folds = zeros(Float32, num_folds)
+    spec_folds = zeros(Float32, num_folds)
+    ppv_folds = zeros(Float32, num_folds)
+    npv_folds = zeros(Float32, num_folds)
+    f1_folds = zeros(Float32, num_folds)
+    accumulator_confusion = zeros(Float32, num_classes, num_classes, num_folds)
+
+    for fold in 1:num_folds
+        # Select train and test indices
+        train_idx = crossValidationIndices .!= fold
+        test_idx = crossValidationIndices .== fold
+
+        input_train = inputs[train_idx, :]
+        target_train = targets[train_idx]
+        input_test = inputs[test_idx, :]
+        target_test = targets[test_idx]
+        
+
+        parameters = calculateZeroMeanNormalizationParameters(input_train)
+        normalizeZeroMean!(input_train ,parameters)
+        normalizeZeroMean!(input_test ,parameters)
+
+
+        # Train the network
+        model = createModel(modelType, modelHyperparameters)
+        mach = machine(model, MLJ.table(input_train), categorical(target_train))
+        MLJ.fit!(mach, verbosity=0)
+
+        # Evaluación
+        outputs_test = MLJ.predict(mach, MLJ.table(input_test))
+        
+        if modelType == :DecisionTreeClassifier || modelType == :KNeighborsClassifier
+            outputs_test = mode.(outputs_test)
+        end
+
+        # Convert CategoricalArray to string vector for confusionMatrix
+        outputs_test = string.(outputs_test)
+        acc, err, sens, spec, ppv, npv, f1, conf = confusionMatrix(outputs_test, target_test, classes; weighted=false)
+
+        
+        acc_folds[fold]  = acc
+        err_folds[fold]  = err
+        sens_folds[fold] = sens
+        spec_folds[fold] = spec
+        ppv_folds[fold]  = ppv
+        npv_folds[fold]  = npv
+        f1_folds[fold]   = f1
+        accumulator_confusion[:, :, fold] = conf
+    end
+
+    results = (
+        accuracy = (mean(acc_folds), std(acc_folds)),
+        error = (mean(err_folds), std(err_folds)),
+        sensitivity = (mean(sens_folds), std(sens_folds)),
+        specificity = (mean(spec_folds), std(spec_folds)),
+        PPV = (mean(ppv_folds), std(ppv_folds)),
+        NPV = (mean(npv_folds), std(npv_folds)),
+        F1 = (mean(f1_folds), std(f1_folds)),
+        conf_matrix=dropdims(mean(accumulator_confusion, dims=3), dims=3)
+    ) 
+    return (results, mach)
+end
+
+"""
+   function evaluate_regression(y_pred, y_true)
+
+Compute regression evaluation metrics: RMSE and R².
+
+# Arguments:
+- `y_pred::AbstractArray{<:Real,1}`: Predicted continuous values.
+- `y_true::AbstractArray{<:Real,1}`: Ground-truth continuous
+
+# Returns:
+- `NamedTuple`: RMSE and R² metrics.
+"""
+function evaluate_regression(y_pred::AbstractArray{<:Real,1}, y_true::AbstractArray{<:Real,1})
+    @assert length(y_pred) == length(y_true) "Predicted and true values must have the same length"
+
+    n = length(y_true)
+    residuals = y_true .- y_pred
+    ss_res = sum(residuals .^ 2)
+    ss_tot = sum((y_true .- mean(y_true)) .^ 2)
+
+    rmse = sqrt(ss_res / n)
+    r_squared = 1.0 - (ss_res / ss_tot)
+
+    return (RMSE = rmse, R2 = r_squared)
+end
 end
