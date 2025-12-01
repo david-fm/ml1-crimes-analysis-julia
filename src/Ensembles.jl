@@ -1,5 +1,6 @@
 module Ensembles
 
+using Random
 using MLJ
 using MLJBase
 import MLJModelInterface
@@ -13,7 +14,11 @@ const FiniteT     = MLJModelInterface.Finite
 
 export VotingClassifier,
        evaluate_voting_classifier,
-       run_voting_ensembles
+       run_voting_ensembles,
+       run_regression_ensembles,
+       VotingRegressor,
+       run_stacking_ensembles
+
 
 # ===================================================
 # DEFINITION OF VOTINGCLASSIFIER COMPATIBLE WITH MLJ
@@ -246,7 +251,7 @@ Keyword args:
 - `title_prefix` :: String  – used in plot titles
 - `cm_plotter` :: Union{Nothing, Function}
     If provided, it is called as:
-    `cm_plotter(outputs, y_test_str, classes, "$title_prefix - $ds_name")`
+    ``
 
 Returns:
 - `ensemble_results` :: Dict{String, Tuple{Vector{String}, Vector{String}}}
@@ -259,8 +264,12 @@ function run_voting_ensembles(
     voting::Symbol = :hard,
     weights = nothing,
     title_prefix::String = "Ensemble",
-    cm_plotter = nothing
+    cm_plotter = nothing,
+    rng_seed::Union{Nothing,Int} = 1234
 )
+
+    Random.seed!(rng_seed)
+
     y_train_cat = categorical(y_train)
     y_test_str  = string.(y_test)
 
@@ -293,6 +302,149 @@ function run_voting_ensembles(
     end
 
     return ensemble_results
+end
+
+function run_stacking_ensembles(
+    ensemble_specs::Dict{String,<:NamedTuple},
+    y_train,
+    y_test;
+    base_model_names = (:ANN, :SVM, :DT, :KNN),
+    metalearner,
+    resampling,
+    measures,
+    title_prefix::String = "Stacking Ensemble",
+    cm_plotter = nothing
+)
+    y_train_cat = categorical(y_train)
+    y_test_str  = string.(y_test)
+
+    results = Dict{String, Tuple{Vector{String}, Vector{String}}}()
+
+    for (ds_name, spec) in ensemble_specs
+        X_train     = spec.X_train
+        X_test      = spec.X_test
+        base_models = spec.models   # expected order compatible with base_model_names
+
+        @assert length(base_models) == length(base_model_names) "base_model_names and models length mismatch"
+
+        # (ANN = ann_model, SVM = svm_model, DT = dt_model, KNN = knn_model)
+        base_models_nt = (; zip(base_model_names, base_models)...)
+
+        stack_model = Stack(;
+            metalearner = metalearner,
+            resampling  = resampling,
+            measures    = measures,
+            base_models_nt...    # expand as keyword args
+        )
+
+        mach = machine(stack_model, MLJ.table(X_train), y_train_cat)
+        MLJ.fit!(mach, rows = 1:size(X_train, 1), verbosity = 0)
+
+        yhat    = MLJ.predict_mode(mach, MLJ.table(X_test))
+        outputs = string.(yhat)
+
+        results[ds_name] = (outputs, y_test_str)
+
+        if cm_plotter !== nothing
+            classes = unique(vcat(outputs, y_test_str))
+            cm_plotter(outputs, y_test_str, classes, "$title_prefix - $(ds_name)")
+        end
+    end
+
+    return results
+end
+
+
+# =========================================
+# REGRESSION ENSEMBLE (VOTING REGRESSOR)
+# =========================================
+
+mutable struct VotingRegressor <: Deterministic
+    models::Vector{Deterministic}
+    weights::Union{Nothing, Vector{Float64}}
+end
+
+function VotingRegressor(; models=Deterministic[], weights=nothing)
+    normalized_weights = nothing
+    if weights !== nothing
+        @assert length(weights) == length(models) "Number of weights must match number of models"
+        @assert all(w >= 0 for w in weights) "All weights must be non-negative"
+        normalized_weights = Float64.(weights)
+        s = sum(normalized_weights)
+        @assert s > 0 "Sum of weights must be > 0"
+        normalized_weights ./= s
+    end
+    VotingRegressor(models, normalized_weights)
+end
+
+function MLJModelInterface.fit(model::VotingRegressor, verbosity::Int, X, y)
+    machs = [begin
+        mm = machine(deepcopy(m), X, y)
+        MLJ.fit!(mm, verbosity=0)
+        mm
+    end for m in model.models]
+
+    fitresults = (machines = machs,)
+    cache = nothing
+    report = (n_models = length(model.models), weights = model.weights)
+
+    return fitresults, cache, report
+end
+
+function MLJModelInterface.predict(model::VotingRegressor, fitresult, Xnew)
+    machines = fitresult.machines
+    preds    = [MLJ.predict(m, Xnew) for m in machines]
+
+    n_samples = length(preds[1])
+    n_models  = length(machines)
+    weights   = model.weights === nothing ? fill(1.0 / n_models, n_models) : model.weights
+
+    yhat = zeros(Float64, n_samples)
+    for i in 1:n_samples
+        s = 0.0
+        for (j, p) in enumerate(preds)
+            s += weights[j] * float(p[i])
+        end
+        yhat[i] = s
+    end
+
+    return yhat
+end
+
+MLJModelInterface.metadata_model(VotingRegressor,
+    input_scitype  = Table(Continuous),
+    target_scitype = AbstractVector{Continuous},
+    supports_weights = false,
+    load_path = "VotingRegressor"
+)
+
+# =========================================
+# HELPER TO RUN REGRESSION ENSEMBLES
+# =========================================
+
+function run_regression_ensembles(
+    ensemble_specs::Dict{String,<:NamedTuple},
+    y_train,
+    y_test;
+    weights      = nothing
+)
+    results = Dict{String, Tuple{Vector{Float64}, Vector{Float64}}}()
+
+    for (ds_name, spec) in ensemble_specs
+        Xtr = spec.X_train
+        Xte = spec.X_test
+        base_models = spec.models
+
+        model = VotingRegressor(models = base_models, weights = weights)
+        mach  = machine(model, MLJ.table(Xtr), Float32.(y_train))
+        MLJ.fit!(mach, rows = 1:size(Xtr, 1), verbosity = 0)
+
+        yhat = MLJ.predict(mach, MLJ.table(Xte))
+
+        results[ds_name] = (Float64.(yhat), Float64.(y_test))
+    end
+
+    return results
 end
 
 
