@@ -17,7 +17,8 @@ export VotingClassifier,
        run_voting_ensembles,
        run_regression_ensembles,
        VotingRegressor,
-       run_stacking_ensembles
+       run_stacking_ensembles,
+       summarize_regression_ensembles
 
 
 # ===================================================
@@ -445,6 +446,51 @@ function run_regression_ensembles(
     end
 
     return results
+end
+
+"""
+    summarize_regression_ensembles(results, ordered_datasets; metric_fn)
+
+Utility to summarize regression ensembles over multiple representations.
+
+Arguments
+---------
+- `results` :: Dict{String, Tuple{Vector{Float64}, Vector{Float64}}}
+    Output of `run_regression_ensembles`, mapping
+    dataset name => (predictions, ground_truth).
+
+- `ordered_datasets` :: Vector{String}
+    Order in which you want the results.
+
+Keyword arguments
+-----------------
+- `metric_fn` :: Function
+    A function `metric_fn(preds, truth)` returning `(value, extra...)`,
+    e.g. your `evaluate_regression`.
+
+Returns
+-------
+Named tuple:
+
+- `representations` :: Vector{String}
+- `metrics`         :: Vector{Float64}
+"""
+function summarize_regression_ensembles(
+    results::Dict{String, Tuple{Vector{Float64}, Vector{Float64}}},
+    ordered_datasets::Vector{String};
+    metric_fn
+)
+    reps    = String[]
+    metrics = Float64[]
+
+    for ds_name in ordered_datasets
+        preds, truth = results[ds_name]
+        val, _ = metric_fn(Float32.(preds), Float32.(truth))
+        push!(reps, ds_name)
+        push!(metrics, val)
+    end
+
+    return (representations = reps, metrics = metrics)
 end
 
 
