@@ -6,19 +6,32 @@ using MLJBase
 import MLJModelInterface
 using CategoricalArrays
 using ..Output: printConfusionMatrix
+using MLJ
+import LIBSVM
+using ..Training: evaluate_regression
+using Printf;
+
+
+const SVMPlassifier = @load ProbabilisticSVC pkg = LIBSVM verbosity = 0
+const EpsilonSVRRegressor = @load EpsilonSVR pkg=LIBSVM verbosity=0
+
 
 # For metadata
 const TableType   = MLJModelInterface.Table
 const ContinuousT = MLJModelInterface.Continuous
 const FiniteT     = MLJModelInterface.Finite
 
+
 export VotingClassifier,
        evaluate_voting_classifier,
        run_voting_ensembles,
        run_regression_ensembles,
        VotingRegressor,
-       run_stacking_ensembles,
-       summarize_regression_ensembles
+       run_stacking_ensemble,
+       summarize_regression_ensembles,
+       plotEnsembleConfusionMatrix,
+       plotConfusionEnsemble,
+       run_regression_stacking_ensembles
 
 
 # ===================================================
@@ -265,21 +278,27 @@ function run_voting_ensembles(
     voting::Symbol = :hard,
     weights = nothing,
     title_prefix::String = "Ensemble",
-    cm_plotter = nothing,
-    rng_seed::Union{Nothing,Int} = 1234
+    rng_seed::Union{Nothing,Int} = 1234,
+    weighted_metrics::Bool = true
 )
-
-    Random.seed!(rng_seed)
+    if rng_seed !== nothing
+        Random.seed!(rng_seed)
+    end
 
     y_train_cat = categorical(y_train)
     y_test_str  = string.(y_test)
 
     ensemble_results = Dict{String, Tuple{Vector{String}, Vector{String}}}()
 
+    println("\nVOTING ENSEMBLES – CLASSIFICATION")
+    println("=================================\n")
+
     for (ds_name, spec) in ensemble_specs
-        X_train    = spec.X_train
-        X_test     = spec.X_test
+        X_train     = spec.X_train
+        X_test      = spec.X_test
         base_models = spec.models
+
+        println(">>> [$title_prefix] Dataset: $ds_name (voting=$(voting))")
 
         voting_model = VotingClassifier(
             models  = base_models,
@@ -290,69 +309,100 @@ function run_voting_ensembles(
         mach = machine(voting_model, MLJ.table(X_train), y_train_cat)
         MLJ.fit!(mach, rows = 1:size(X_train, 1), verbosity = 0)
 
-        # Predictions for this ensemble
         yhat    = MLJ.predict_mode(mach, MLJ.table(X_test))
         outputs = string.(yhat)
 
+        # Guardamos para gráficos u otros análisis posteriores
         ensemble_results[ds_name] = (outputs, y_test_str)
 
-        if cm_plotter !== nothing
-            classes = unique(vcat(outputs, y_test_str))
-            cm_plotter(outputs, y_test_str, classes, "$title_prefix - $(ds_name)")
-        end
+        # Métricas + matriz de confusión con el formato del profesor
+        classes = unique(vcat(outputs, y_test_str))
+        printConfusionMatrix(outputs, y_test_str, classes; weighted=weighted_metrics)
+        println()  # línea en blanco para legibilidad
     end
 
     return ensemble_results
 end
 
+
+"""
+    run_stacking_ensembles(specs, y_train, y_test;
+                           base_names = (:ANN, :SVM, :DT, :KNN),
+                           metalearner = SVMPlassifier(),
+                           nfolds = 5,
+                           rng_seed = 1234,
+                           title_prefix = "Stacking Ensemble",
+                           plot_cm = nothing)
+
+Build and evaluate a stacking ensemble for each representation in `specs`.
+
+- `specs` is a Dict like:
+    Dict(
+        "Raw Attributes" => (X_train = ..., X_test = ..., models = [m_ann, m_svm, m_dt, m_knn]),
+        "PCA (95% Var)"  => (X_train = ..., X_test = ..., models = [...]),
+        ...
+    )
+
+- `y_train`, `y_test` are the target vectors (same encoding as in the rest of the notebook).
+- `base_names` are the names used for the base models inside the `Stack`.
+- `metalearner` is the meta-model (default: probabilistic SVM).
+- If `plot_cm` is not `nothing`, it will be called as
+    plot_cm(outputs, targets, classes, title).
+
+Returns a Dict{String, NamedTuple} with metrics and confusion matrix per representation.
+"""
 function run_stacking_ensembles(
-    ensemble_specs::Dict{String,<:NamedTuple},
+    specs::Dict{String, <:NamedTuple},
     y_train,
     y_test;
-    base_model_names = (:ANN, :SVM, :DT, :KNN),
-    metalearner,
-    resampling,
-    measures,
-    title_prefix::String = "Stacking Ensemble",
-    cm_plotter = nothing
+    base_names::NTuple = (:ANN, :SVM, :DT, :KNN),
+    metalearner = SVMPlassifier(),
+    nfolds::Int = 5,
+    rng_seed::Int = 1234,
+    title_prefix::String = "Stacking",
+    weighted_metrics::Bool = true
 )
-    y_train_cat = categorical(y_train)
-    y_test_str  = string.(y_test)
+    Random.seed!(rng_seed)
 
-    results = Dict{String, Tuple{Vector{String}, Vector{String}}}()
+    ensemble_results = Dict{String, Tuple{Vector{String}, Vector{String}}}()
 
-    for (ds_name, spec) in ensemble_specs
-        X_train     = spec.X_train
-        X_test      = spec.X_test
-        base_models = spec.models   # expected order compatible with base_model_names
+    println("\nSTACKING ENSEMBLES – CLASSIFICATION")
+    println("===================================\n")
 
-        @assert length(base_models) == length(base_model_names) "base_model_names and models length mismatch"
+    for (repr_name, spec) in specs
+        Xtr         = spec.X_train
+        Xte         = spec.X_test
+        base_models = spec.models
 
-        # (ANN = ann_model, SVM = svm_model, DT = dt_model, KNN = knn_model)
-        base_models_nt = (; zip(base_model_names, base_models)...)
+        @assert length(base_models) == length(base_names) "Number of base models must match base_names."
 
-        stack_model = Stack(;
+        println(">>> [$title_prefix] Representation: $repr_name")
+
+        base_tuple = NamedTuple{base_names}(base_models)
+
+        stack_model = Stack(
             metalearner = metalearner,
-            resampling  = resampling,
-            measures    = measures,
-            base_models_nt...    # expand as keyword args
+            resampling  = CV(nfolds = nfolds, shuffle = true, rng = rng_seed),
+            measures    = [log_loss];
+            base_tuple...
         )
 
-        mach = machine(stack_model, MLJ.table(X_train), y_train_cat)
-        MLJ.fit!(mach, rows = 1:size(X_train, 1), verbosity = 0)
+        stack_mach = machine(stack_model, MLJ.table(Xtr), categorical(y_train))
+        MLJ.fit!(stack_mach, verbosity = 0)
 
-        yhat    = MLJ.predict_mode(mach, MLJ.table(X_test))
-        outputs = string.(yhat)
+        yhat_mode = MLJ.predict_mode(stack_mach, MLJ.table(Xte))
 
-        results[ds_name] = (outputs, y_test_str)
+        outputs = string.(yhat_mode)
+        targets = string.(y_test)
 
-        if cm_plotter !== nothing
-            classes = unique(vcat(outputs, y_test_str))
-            cm_plotter(outputs, y_test_str, classes, "$title_prefix - $(ds_name)")
-        end
+        ensemble_results[repr_name] = (outputs, targets)
+
+        classes = unique(vcat(outputs, targets))
+        printConfusionMatrix(outputs, targets, classes; weighted=weighted_metrics)
+        println()
     end
 
-    return results
+    return ensemble_results
 end
 
 
@@ -427,14 +477,19 @@ function run_regression_ensembles(
     ensemble_specs::Dict{String,<:NamedTuple},
     y_train,
     y_test;
-    weights      = nothing
+    weights = nothing
 )
     results = Dict{String, Tuple{Vector{Float64}, Vector{Float64}}}()
 
+    println("\nVOTING ENSEMBLES – REGRESSION")
+    println("================================\n")
+
     for (ds_name, spec) in ensemble_specs
-        Xtr = spec.X_train
-        Xte = spec.X_test
+        Xtr         = spec.X_train
+        Xte         = spec.X_test
         base_models = spec.models
+
+        println(">>> Regression ensemble on dataset: $ds_name")
 
         model = VotingRegressor(models = base_models, weights = weights)
         mach  = machine(model, MLJ.table(Xtr), Float32.(y_train))
@@ -442,7 +497,15 @@ function run_regression_ensembles(
 
         yhat = MLJ.predict(mach, MLJ.table(Xte))
 
-        results[ds_name] = (Float64.(yhat), Float64.(y_test))
+        yhat_f  = Float64.(yhat)
+        ytest_f = Float64.(y_test)
+
+        results[ds_name] = (yhat_f, ytest_f)
+
+        # Métricas oficiales de regresión
+        m = evaluate_regression(yhat_f, ytest_f)
+        println("  RMSE = $(round(m.RMSE, digits=4))")
+        println("  R²   = $(round(m.R2,   digits=4))\n")
     end
 
     return results
@@ -491,6 +554,70 @@ function summarize_regression_ensembles(
     end
 
     return (representations = reps, metrics = metrics)
+end
+
+function run_regression_stacking_ensembles(
+    specs::Dict{String, <:NamedTuple},
+    y_train,
+    y_test;
+    base_names::NTuple = (:ANN, :SVM, :DT, :KNN),
+    meta_regressor = nothing,
+    nfolds::Int = 5,
+    rng_seed::Int = 1234,
+    title_prefix::String = "Stacking Regression"
+)
+    Random.seed!(rng_seed)
+
+    # Default meta-regressor if not provided
+    if meta_regressor === nothing
+        meta_regressor = EpsilonSVRRegressor(
+            kernel = LIBSVM.Kernel.RadialBasis,
+            cost   = 10.0,
+            gamma  = 0.1
+        )
+    end
+
+    reg_stacking_results = Dict{String, Tuple{Vector{Float64}, Vector{Float64}}}()
+
+    println("\nREGRESSION ENSEMBLES – STACKING")
+    println("================================")
+
+    for (name, spec) in specs
+        Xtr         = spec.X_train
+        Xte         = spec.X_test
+        base_models = spec.models   # [ann, svm, dt, knn] in the order of base_names
+
+        @assert length(base_models) == length(base_names) "Number of base models must match base_names."
+
+        println("\n>>> Building stacking regression ensemble for: $name")
+
+        # (ANN = m1, SVM = m2, DT = m3, KNN = m4)
+        base_tuple = NamedTuple{base_names}(base_models)
+
+        stack_model = Stack(
+            metalearner = meta_regressor,
+            resampling  = CV(nfolds = nfolds, shuffle = true, rng = rng_seed),
+            measures    = [rms];   # internal CV metric (RMSE)
+            base_tuple...
+        )
+
+        # Train meta-model
+        stack_mach = machine(stack_model, MLJ.table(Xtr), Float32.(y_train))
+        MLJ.fit!(stack_mach, verbosity = 0)
+
+        # Predict on test data
+        yhat  = MLJ.predict(stack_mach, MLJ.table(Xte))
+        preds = Float64.(yhat)
+        truth = Float64.(y_test)
+
+        reg_stacking_results[name] = (preds, truth)
+
+        # Optional: print RMSE per representation using your evaluate_regression
+        rmse, _ = evaluate_regression(Float32.(preds), Float32.(truth))
+        @printf("%s – %s: RMSE = %.4f\n", title_prefix, name, rmse)
+    end
+
+    return reg_stacking_results
 end
 
 
