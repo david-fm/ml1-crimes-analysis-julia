@@ -159,7 +159,7 @@ function trainClassANN(topology::AbstractArray{<:Int,1},
     end
 
     # Define the optimazer for the network
-    opt_state = Flux.setup(Adam(learningRate), ann);
+    opt_state = Flux.setup(Flux.Adam(learningRate), ann);
 
     # Start the training until it reaches one of the stop critteria
     while (numEpoch<maxEpochs) && (trainingLoss>minLoss) && 

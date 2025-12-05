@@ -1,6 +1,7 @@
 module Preprocessing
 
 using Statistics
+using DataFrames
 
 export oneHotEncoding,
        vectorizerCategorialFeature,
@@ -8,7 +9,8 @@ export oneHotEncoding,
        normalizeMinMax!,
        calculateZeroMeanNormalizationParameters,
        normalizeZeroMean!,
-       bin_to_multiclass
+       bin_to_multiclass,
+       reduce_features_by_causality
 
 # -----------------------------------------------------------------------------
 # Feature encoding utilities: convert categorical labels to/from one-hot format.
@@ -261,5 +263,59 @@ function bin_to_multiclass(data_vector::AbstractVector{<:Real}, bin_edges::Abstr
         for x in data_vector
     ]
 end
+
+"""
+    reduce_features_by_causality(df, col_target; umbral=0.90)
+
+1. Detect pairs of variables with correlation > umbral (redundant).
+2. Compare which of both have greater correlation with the Target.
+3. Delete the leat predictive power (less "causality").
+"""
+function reduce_features_by_causality(df::DataFrame, col_target::Symbol; umbral=0.90)
+
+    cols_num = names(df, Real)
+    matriz_datos = Matrix(df[:, cols_num])
+    
+    M = cor(matriz_datos)
+    n = length(cols_num)
+    
+    col_idx = Dict(name => i for (i, name) in enumerate(cols_num))
+    idx_target = col_idx[String(col_target)]
+    
+    features_a_eliminar = Set{String}()
+    
+    for i in 1:n
+        for j in (i+1):n
+            col1 = cols_num[i]
+            col2 = cols_num[j]
+            
+            if col1 == String(col_target) || col2 == String(col_target)
+                continue
+            end
+            
+            if abs(M[i, j]) > umbral
+                corr_target_1 = abs(M[i, idx_target])
+                corr_target_2 = abs(M[j, idx_target])
+                
+                perdedor = ""
+                ganador = ""
+                
+                if corr_target_1 >= corr_target_2
+                    perdedor = col2
+                    ganador = col1
+                    push!(features_a_eliminar, col2)
+                else
+                    perdedor = col1
+                    ganador = col2
+                    push!(features_a_eliminar, col1)
+                end
+            end
+        end
+    end
+    
+    df_limpio = select(df, Not(collect(features_a_eliminar)))
+    return df_limpio, M, cols_num
+end
+
 
 end
